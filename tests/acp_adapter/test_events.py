@@ -69,6 +69,61 @@ class TestToolProgressCallback:
         # The coroutine should be conn.session_update
         assert mock_conn.session_update.called or coro is not None
 
+    def test_emits_structured_subagent_lifecycle(self, mock_conn, event_loop_fixture):
+        cb = make_tool_progress_cb(mock_conn, "session-1", event_loop_fixture, {}, {})
+
+        with patch("acp_adapter.events.make_tool_call_id", return_value="tc-child"), patch(
+            "acp_adapter.events._send_update"
+        ) as send:
+            cb(
+                "subagent.start",
+                preview="Inspect the V2 adapter",
+                subagent_id="child-1",
+                child_session_id="session-child-1",
+                model="openai-codex:gpt-5.6-sol",
+                depth=1,
+                goal="Inspect the V2 adapter",
+            )
+            cb(
+                "subagent.tool",
+                "read_file",
+                "AcpAdapterV2.ts",
+                subagent_id="child-1",
+                child_session_id="session-child-1",
+                goal="Inspect the V2 adapter",
+            )
+            cb(
+                "subagent.complete",
+                subagent_id="child-1",
+                child_session_id="session-child-1",
+                goal="Inspect the V2 adapter",
+                status="completed",
+                summary="Mapped the lifecycle",
+            )
+
+        updates = [call.args[3] for call in send.call_args_list]
+        assert [update.session_update for update in updates] == [
+            "tool_call",
+            "tool_call_update",
+            "tool_call_update",
+            "tool_call_update",
+        ]
+        assert updates[0].raw_input["hermesSubagent"] is True
+        assert updates[0].raw_input["subagentId"] == "child-1"
+        assert updates[-1].raw_output == {
+            "event": "subagent.complete",
+            "status": "completed",
+            "childSessionId": "session-child-1",
+            "summary": "Mapped the lifecycle",
+        }
+        assert updates[-1].status == "completed"
+
+    def test_maps_interrupted_subagent_terminal_status(self, mock_conn, event_loop_fixture):
+        cb = make_tool_progress_cb(mock_conn, "session-1", event_loop_fixture, {}, {})
+        with patch("acp_adapter.events._send_update") as send:
+            cb("subagent.complete", subagent_id="child-stop", status="interrupted")
+        assert send.call_args_list[-1].args[3].raw_output["status"] == "interrupted"
+
 
 
     def test_duplicate_same_name_tool_calls_use_fifo_ids(self, mock_conn, event_loop_fixture):

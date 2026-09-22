@@ -60,6 +60,21 @@ class TestCreateSession:
 
 
 
+    def test_fork_session_preserves_reasoning_config(self, manager, monkeypatch):
+        original = manager.create_session()
+        original.agent.reasoning_config = {"enabled": True, "effort": "high"}
+        captured = {}
+
+        def make_agent(**kwargs):
+            captured.update(kwargs)
+            return _mock_agent()
+
+        monkeypatch.setattr(manager, "_make_agent", make_agent)
+        forked = manager.fork_session(original.session_id)
+
+        assert forked is not None
+        assert captured["reasoning_config"] == {"enabled": True, "effort": "high"}
+
 
     def test_make_agent_uses_session_cwd_during_init_and_stamps_runtime(
         self, monkeypatch, tmp_path

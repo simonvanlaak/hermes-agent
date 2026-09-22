@@ -126,6 +126,31 @@ def test_acp_set_session_model_applies_wire_reasoning_effort(monkeypatch):
     assert saved == ["s1", "s1"]  # model rebuild first, then the reasoning override
 
 
+def test_acp_set_session_model_rejects_invalid_reasoning_before_switch(monkeypatch):
+    import asyncio
+
+    from acp.exceptions import RequestError
+
+    called = []
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model", lambda **kwargs: called.append(kwargs)
+    )
+    agent, made = _acp_agent()
+    state = _state()
+    old_agent = state.agent
+    agent.session_manager.get_session = lambda session_id: state
+
+    with pytest.raises(RequestError):
+        asyncio.run(
+            agent.set_session_model(
+                "anthropic:claude-sonnet-5", "s1", reasoningEffort="turbo-ish"
+            )
+        )
+
+    assert called == [] and made == {}
+    assert state.model == "claude-sonnet-5" and state.agent is old_agent
+
+
 def test_acp_set_session_model_rejected_while_turn_running(monkeypatch):
     """The picker swaps state.agent wholesale; mid-turn that strands the running agent and
     makes _finish_turn emit a spurious compression-rotation update."""

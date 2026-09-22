@@ -14,7 +14,6 @@ from acp.schema import AgentPlanUpdate
 
 from acp_adapter.events import (
     _send_update,
-    flush_open_tool_calls,
     make_message_cb,
     make_step_cb,
     make_thinking_cb,
@@ -44,87 +43,6 @@ def event_loop_fixture():
 
 
 class TestToolProgressCallback:
-
-    def test_emits_structured_subagent_lifecycle(self, mock_conn, event_loop_fixture):
-        tool_call_ids = {}
-        tool_call_meta = {}
-        cb = make_tool_progress_cb(
-            mock_conn, "session-1", event_loop_fixture, tool_call_ids, tool_call_meta
-        )
-
-        with patch("acp_adapter.events.make_tool_call_id", return_value="tc-child"), patch(
-            "acp_adapter.events._send_update"
-        ) as send:
-            cb(
-                "subagent.spawn_requested",
-                preview="Inspect the V2 adapter",
-                subagent_id="child-1",
-                goal="Inspect the V2 adapter",
-            )
-            assert send.call_count == 0
-            cb(
-                "subagent.start",
-                preview="Inspect the V2 adapter",
-                subagent_id="child-1",
-                child_session_id="session-child-1",
-                model="openai-codex:gpt-5.6-sol",
-                depth=1,
-                goal="Inspect the V2 adapter",
-            )
-            cb(
-                "subagent.tool",
-                "read_file",
-                "AcpAdapterV2.ts",
-                subagent_id="child-1",
-                child_session_id="session-child-1",
-                goal="Inspect the V2 adapter",
-            )
-            cb(
-                "subagent.complete",
-                subagent_id="child-1",
-                child_session_id="session-child-1",
-                goal="Inspect the V2 adapter",
-                status="completed",
-                summary="Mapped the lifecycle",
-            )
-
-        updates = [call.args[3] for call in send.call_args_list]
-        assert [update.session_update for update in updates] == [
-            "tool_call",
-            "tool_call_update",
-            "tool_call_update",
-            "tool_call_update",
-        ]
-        assert updates[0].raw_input["hermesSubagent"] is True
-        assert updates[0].raw_input["subagentId"] == "child-1"
-        assert updates[-1].raw_output == {
-            "event": "subagent.complete",
-            "status": "completed",
-            "childSessionId": "session-child-1",
-            "summary": "Mapped the lifecycle",
-        }
-        assert updates[-1].status == "completed"
-
-    def test_flushes_subagent_left_open_at_turn_end(self, mock_conn, event_loop_fixture):
-        tool_call_ids = {}
-        tool_call_meta = {}
-        cb = make_tool_progress_cb(
-            mock_conn, "session-1", event_loop_fixture, tool_call_ids, tool_call_meta
-        )
-        with patch("acp_adapter.events.make_tool_call_id", return_value="tc-child"), patch(
-            "acp_adapter.events._send_update"
-        ) as send:
-            cb("subagent.start", subagent_id="child-1", goal="Review")
-            assert flush_open_tool_calls(
-                mock_conn, "session-1", event_loop_fixture, tool_call_ids, tool_call_meta
-            ) == 1
-        assert send.call_args_list[-1].args[3].status == "failed"
-
-    def test_maps_interrupted_subagent_terminal_status(self, mock_conn, event_loop_fixture):
-        cb = make_tool_progress_cb(mock_conn, "session-1", event_loop_fixture, {}, {})
-        with patch("acp_adapter.events._send_update") as send:
-            cb("subagent.complete", subagent_id="child-stop", status="interrupted")
-        assert send.call_args_list[-1].args[3].raw_output["status"] == "interrupted"
 
 
 

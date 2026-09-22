@@ -15,6 +15,7 @@ from acp.schema import AgentPlanUpdate
 from acp_adapter.events import (
     _build_plan_update_from_todo_result,
     _send_update,
+    flush_open_tool_calls,
     make_message_cb,
     make_step_cb,
     make_thinking_cb,
@@ -70,11 +71,22 @@ class TestToolProgressCallback:
         assert mock_conn.session_update.called or coro is not None
 
     def test_emits_structured_subagent_lifecycle(self, mock_conn, event_loop_fixture):
-        cb = make_tool_progress_cb(mock_conn, "session-1", event_loop_fixture, {}, {})
+        tool_call_ids = {}
+        tool_call_meta = {}
+        cb = make_tool_progress_cb(
+            mock_conn, "session-1", event_loop_fixture, tool_call_ids, tool_call_meta
+        )
 
         with patch("acp_adapter.events.make_tool_call_id", return_value="tc-child"), patch(
             "acp_adapter.events._send_update"
         ) as send:
+            cb(
+                "subagent.spawn_requested",
+                preview="Inspect the V2 adapter",
+                subagent_id="child-1",
+                goal="Inspect the V2 adapter",
+            )
+            assert send.call_count == 0
             cb(
                 "subagent.start",
                 preview="Inspect the V2 adapter",
@@ -117,6 +129,21 @@ class TestToolProgressCallback:
             "summary": "Mapped the lifecycle",
         }
         assert updates[-1].status == "completed"
+
+    def test_flushes_subagent_left_open_at_turn_end(self, mock_conn, event_loop_fixture):
+        tool_call_ids = {}
+        tool_call_meta = {}
+        cb = make_tool_progress_cb(
+            mock_conn, "session-1", event_loop_fixture, tool_call_ids, tool_call_meta
+        )
+        with patch("acp_adapter.events.make_tool_call_id", return_value="tc-child"), patch(
+            "acp_adapter.events._send_update"
+        ) as send:
+            cb("subagent.start", subagent_id="child-1", goal="Review")
+            assert flush_open_tool_calls(
+                mock_conn, "session-1", event_loop_fixture, tool_call_ids, tool_call_meta
+            ) == 1
+        assert send.call_args_list[-1].args[3].status == "failed"
 
     def test_maps_interrupted_subagent_terminal_status(self, mock_conn, event_loop_fixture):
         cb = make_tool_progress_cb(mock_conn, "session-1", event_loop_fixture, {}, {})

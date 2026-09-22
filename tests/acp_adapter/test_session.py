@@ -142,6 +142,37 @@ class TestCreateSession:
         assert (seen[0]["enabled_toolsets"], seen[0]["disabled_toolsets"]) == (["hermes-acp", "mcp-cfg-server"], None)
         assert (seen[1]["enabled_toolsets"], seen[1]["disabled_toolsets"]) == (["hermes-acp", "mcp-acp-server"], ["browser"])
 
+    def test_make_agent_disables_native_delegation_for_t3_owned_acp_sessions(self, monkeypatch):
+        seen: list[dict] = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                seen.append(kwargs)
+
+        monkeypatch.setenv("HERMES_ACP_DISABLE_NATIVE_DELEGATION", "1")
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"model": {"default": "m", "provider": "p"}, "mcp_servers": {}},
+        )
+        monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", lambda **_kw: {})
+        monkeypatch.setattr(
+            "hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None
+        )
+        monkeypatch.setattr("acp_adapter.session._register_task_cwd", lambda task_id, cwd: None)
+
+        manager = SessionManager(db=None)
+        manager._make_agent(session_id="fresh", cwd=".")
+        manager._make_agent(
+            session_id="rebuilt",
+            cwd=".",
+            enabled_toolsets=["hermes-acp", "mcp-t3-code"],
+            disabled_toolsets=["browser"],
+        )
+
+        assert seen[0]["disabled_toolsets"] == ["delegation"]
+        assert seen[1]["disabled_toolsets"] == ["browser", "delegation"]
+
     def test_make_agent_surfaces_the_provider_resolution_failure(self, monkeypatch):
         """#91090: when ``resolve_runtime_provider`` fails, the bare-AIAgent fallback dies with the
         first-run "No LLM provider configured" text; the operator must get the swallowed cause

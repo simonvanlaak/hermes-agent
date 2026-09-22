@@ -108,6 +108,21 @@ def _expand_acp_enabled_toolsets(toolsets: List[str] | None = None,
     return list(dict.fromkeys(names))
 
 
+def _acp_disabled_toolsets(toolsets: List[str] | None = None) -> List[str] | None:
+    """Apply host-owned ACP tool restrictions without changing standalone Hermes.
+
+    T3 owns delegated child threads through its MCP server. Its ACP process sets
+    ``HERMES_ACP_DISABLE_NATIVE_DELEGATION=1`` so the model cannot accidentally
+    spawn a native background child whose completion has no route back into the
+    already-finished T3 turn.
+    """
+    names = list(toolsets or [])
+    if os.environ.get("HERMES_ACP_DISABLE_NATIVE_DELEGATION") == "1":
+        names.append("delegation")
+    deduplicated = list(dict.fromkeys(name for name in names if name))
+    return deduplicated or None
+
+
 def _parse_model_config(mc: Any) -> dict:
     """Decode a persisted model_config JSON blob; ``{}`` when absent/invalid/non-dict."""
     try:
@@ -485,7 +500,7 @@ class SessionManager:
             "platform": "acp", "quiet_mode": True, "session_id": session_id, "session_db": self._get_db(),
             "enabled_toolsets": (list(enabled_toolsets) if enabled_toolsets is not None
                                  else _expand_acp_enabled_toolsets(["hermes-acp"], mcp_server_names=configured_mcp_servers)),
-            "disabled_toolsets": list(disabled_toolsets) if disabled_toolsets is not None else None,
+            "disabled_toolsets": _acp_disabled_toolsets(disabled_toolsets),
             "model": model or default_model,
             "cwd": cwd,
             # Same chokepoint as the CLI/gateway/TUI/cron: without it ``agent.reasoning_effort: none`` never

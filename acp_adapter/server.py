@@ -1026,20 +1026,22 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 raise acp.RequestError(-32603, "Session is busy; switch models while the session is idle")
             state.command_op = True
         try:
+            reasoning_effort = kwargs.get("reasoningEffort")
+            parsed_reasoning = None
+            if reasoning_effort is not None:
+                from hermes_constants import parse_reasoning_effort
+
+                parsed_reasoning = parse_reasoning_effort(reasoning_effort)
+                if parsed_reasoning is None:
+                    raise acp.RequestError.invalid_params(
+                        {"details": f"Unsupported reasoning effort: {reasoning_effort}"}
+                    )
             # switch_model() does synchronous network I/O (models.dev, custom-endpoint probes,
             # ~10 s cold) — off the loop, like the gateway, so other ACP sessions keep flowing.
             try:
                 _old, requested_provider, resolved_model = await asyncio.to_thread(
                     self._switch_model, state, model_id, keep_endpoint=True)
-                reasoning_effort = kwargs.get("reasoningEffort")
-                if reasoning_effort is not None:
-                    from hermes_constants import parse_reasoning_effort
-
-                    parsed_reasoning = parse_reasoning_effort(reasoning_effort)
-                    if parsed_reasoning is None:
-                        raise acp.RequestError.invalid_params(
-                            {"details": f"Unsupported reasoning effort: {reasoning_effort}"}
-                        )
+                if parsed_reasoning is not None:
                     state.agent.reasoning_config = parsed_reasoning
                     self.session_manager.save_session(session_id)
             except ModelRejected as exc:

@@ -7,6 +7,7 @@ Drives the real ``hermes`` argparse entrypoint; only the network fetch is replac
 import json
 import sys
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
@@ -61,4 +62,34 @@ def test_hermes_usage_without_credential_exits_nonzero_with_one_stderr_line(caps
     out, err = capsys.readouterr()
     assert out == ""
     assert err.count("\n") == 1 and "openai-codex" in err
+
+
+def test_hermes_usage_all_credentials_reports_partial_failures(capsys):
+    entries = [
+        SimpleNamespace(
+            id="account-a", label="working", priority=1,
+            runtime_base_url="https://a.invalid", runtime_api_key="a",
+        ),
+        SimpleNamespace(
+            id="account-b", label="expired", priority=2,
+            runtime_base_url="https://b.invalid", runtime_api_key="b",
+        ),
+    ]
+    pool = SimpleNamespace(entries=lambda: entries)
+
+    def fetch(_provider, **kwargs):
+        return _SNAPSHOT if kwargs.get("api_key") == "a" else None
+
+    with patch("agent.credential_pool.load_pool", return_value=pool):
+        assert _run(
+            ["usage", "--json", "--all-credentials", "--provider", "openai-codex"], fetch
+        ) == 0
+
+    out, err = capsys.readouterr()
+    doc = json.loads(out)
+    assert err == "" and doc["complete"] is False
+    assert [account["id"] for account in doc["accounts"]] == ["account-a", "account-b"]
+    assert doc["accounts"][0]["usage"]["plan"] == "Plus"
+    assert doc["accounts"][1]["usage"] is None
+    assert doc["accounts"][1]["unavailable"] is True
 

@@ -101,6 +101,31 @@ def test_acp_set_session_model_runs_switch_model_off_the_event_loop(monkeypatch)
     assert seen["thread"] is not loop_thread
 
 
+def test_acp_set_session_model_applies_wire_reasoning_effort(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model",
+        lambda **kw: ModelSwitchResult(
+            success=True, new_model=kw["raw_input"], target_provider="anthropic"
+        ),
+    )
+    agent, _made = _acp_agent()
+    state = _state()
+    saved = []
+    agent.session_manager.get_session = lambda session_id: state
+    agent.session_manager.save_session = lambda session_id: saved.append(session_id)
+
+    asyncio.run(
+        agent.set_session_model(
+            "anthropic:claude-sonnet-5", "s1", reasoningEffort="high"
+        )
+    )
+
+    assert state.agent.reasoning_config == {"enabled": True, "effort": "high"}
+    assert saved == ["s1", "s1"]  # model rebuild first, then the reasoning override
+
+
 def test_acp_set_session_model_rejected_while_turn_running(monkeypatch):
     """The picker swaps state.agent wholesale; mid-turn that strands the running agent and
     makes _finish_turn emit a spurious compression-rotation update."""

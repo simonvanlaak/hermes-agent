@@ -44,36 +44,43 @@ def cmd_usage(args: argparse.Namespace) -> int:
     if getattr(args, "all_credentials", False):
         from agent.credential_pool import load_pool
 
-        account_snapshots = []
+        account_rows = []
         for entry in load_pool(provider).entries():
             snapshot = fetch_account_usage(
                 provider,
                 base_url=entry.runtime_base_url,
                 api_key=entry.runtime_api_key,
             )
-            if snapshot is None:
-                continue
-            account_snapshots.append((entry, snapshot))
+            account_rows.append((entry, snapshot))
         accounts = [
             {
                 "id": entry.id,
                 "label": entry.label,
                 "priority": entry.priority,
-                "usage": usage_snapshot_document(snapshot),
+                "usage": usage_snapshot_document(snapshot) if snapshot is not None else None,
+                "unavailable": snapshot is None,
             }
-            for entry, snapshot in account_snapshots
+            for entry, snapshot in account_rows
         ]
-        if not accounts:
+        available_accounts = [row for row in account_rows if row[1] is not None]
+        if not available_accounts:
             print(f"No account usage available for provider '{provider}'.", file=sys.stderr)
             return 1
         if getattr(args, "json", False):
-            print(json.dumps({"provider": provider, "accounts": accounts}, indent=2))
+            print(json.dumps({
+                "provider": provider,
+                "complete": len(available_accounts) == len(accounts),
+                "accounts": accounts,
+            }, indent=2))
         else:
-            for index, (entry, snapshot) in enumerate(account_snapshots):
+            for index, (entry, snapshot) in enumerate(account_rows):
                 if index:
                     print()
                 print(entry.label)
-                print("\n".join(render_account_usage_lines(snapshot)))
+                if snapshot is None:
+                    print("Usage unavailable for this credential.")
+                else:
+                    print("\n".join(render_account_usage_lines(snapshot)))
         return 0
     # No explicit key: the fetcher resolves the credential exactly as a session without a live agent
     # would (singleton store, then credential pool) — it never adopts or refreshes anything else.

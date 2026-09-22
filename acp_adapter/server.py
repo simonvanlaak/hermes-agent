@@ -1031,14 +1031,16 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             try:
                 _old, requested_provider, resolved_model = await asyncio.to_thread(
                     self._switch_model, state, model_id, keep_endpoint=True)
-                metadata = kwargs.get("field_meta") or kwargs.get("_meta") or kwargs.get("meta")
-                reasoning_effort = metadata.get("reasoningEffort") if isinstance(metadata, dict) else None
-                if isinstance(reasoning_effort, str) and reasoning_effort.strip():
-                    effort = reasoning_effort.strip().lower()
-                    state.agent.reasoning_config = {
-                        "enabled": effort != "none",
-                        "effort": effort,
-                    }
+                reasoning_effort = kwargs.get("reasoningEffort")
+                if reasoning_effort is not None:
+                    from hermes_constants import parse_reasoning_effort
+
+                    parsed_reasoning = parse_reasoning_effort(reasoning_effort)
+                    if parsed_reasoning is None:
+                        raise acp.RequestError.invalid_params(
+                            {"details": f"Unsupported reasoning effort: {reasoning_effort}"}
+                        )
+                    state.agent.reasoning_config = parsed_reasoning
                     self.session_manager.save_session(session_id)
             except ModelRejected as exc:
                 # A model no provider can serve is a bad ``modelId`` param (-32602), not an agent

@@ -344,6 +344,10 @@ def test_stale_fleet_matrix_on_latest_receipt_is_pending(monkeypatch):
 
 
 def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
+    initialized = []
+    monkeypatch.setattr(
+        "hermes_cli.gateway._ensure_user_systemd_env", lambda: initialized.append(True)
+    )
     monkeypatch.setattr(
         "hermes_cli.gateway.find_gateway_pids", lambda **k: []
     )
@@ -361,6 +365,7 @@ def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
     # And the Windows scope: an installed Windows gateway service would be restarted for real.
     monkeypatch.setattr("hermes_cli.gateway_windows.is_installed", lambda: False)
     assert update_cmd._run_pending_fleet_restart() is True
+    assert initialized == [True]
     assert "Pending fleet restart completed" in capsys.readouterr().out
 
 

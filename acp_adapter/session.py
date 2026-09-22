@@ -334,11 +334,14 @@ class SessionManager:
 
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
-        session_meta = {"cwd": state.cwd}
+        session_meta: dict[str, Any] = {"cwd": state.cwd}
         for key in ("provider", "base_url", "api_mode"):
             value = getattr(state.agent, key, None)
             if isinstance(value, str) and value.strip():
                 session_meta[key] = value.strip()
+        reasoning_config = getattr(state.agent, "reasoning_config", None)
+        if isinstance(reasoning_config, dict):
+            session_meta["reasoning_config"] = reasoning_config
 
         try:
             if db.get_session(state.session_id) is None:
@@ -458,7 +461,8 @@ class SessionManager:
             agent = self._make_agent(
                 session_id=session_id, cwd=cwd, model=model, api_mode=meta.get("api_mode") or None,
                 requested_provider=meta.get("provider") or row.get("billing_provider"),
-                base_url=meta.get("base_url") or row.get("billing_base_url"))
+                base_url=meta.get("base_url") or row.get("billing_base_url"),
+                reasoning_config=meta.get("reasoning_config"))
         except Exception:
             logger.warning("Failed to recreate agent for ACP session %s", session_id, exc_info=True)
             return None
@@ -471,7 +475,8 @@ class SessionManager:
 
     def _make_agent(self, *, session_id: str, cwd: str, model: str | None = None,
                     requested_provider: str | None = None, base_url: str | None = None, api_mode: str | None = None,
-                    enabled_toolsets: list[str] | None = None, disabled_toolsets: list[str] | None = None):
+                    enabled_toolsets: list[str] | None = None, disabled_toolsets: list[str] | None = None,
+                    reasoning_config: dict | None = None):
         """``enabled_toolsets``/``disabled_toolsets`` carry a live session's toolsets into a rebuild; ``None`` derives
         them from config (fresh session)."""
         if self._agent_factory is not None:
@@ -513,7 +518,11 @@ class SessionManager:
             # Same chokepoint as the CLI/gateway/TUI/cron: without it ``agent.reasoning_effort: none`` never
             # reaches an ACP session and the transport applies its default effort (a 400 on non-reasoning
             # models). Resolved against the session's model so per-model overrides apply.
-            "reasoning_config": resolve_reasoning_config(config, model or default_model),
+            "reasoning_config": (
+                reasoning_config
+                if isinstance(reasoning_config, dict)
+                else resolve_reasoning_config(config, model or default_model)
+            ),
         }
         resolve_error: Exception | None = None
         try:

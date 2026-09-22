@@ -130,8 +130,6 @@ def make_tool_progress_cb(
     ``tool.completed`` closes that call with its own result — the step callback
     only fires on the *next* step, which leaves a turn's last tools open."""
 
-    subagent_tool_ids: Dict[str, str] = {}
-
     def _subagent_identity(kwargs: Dict[str, Any]) -> str | None:
         value = kwargs.get("subagent_id") or kwargs.get("child_session_id")
         if value:
@@ -161,14 +159,23 @@ def make_tool_progress_cb(
     def _relay_subagent(event_type: str, name: Any, preview: Any, kwargs: Dict[str, Any]) -> bool:
         if not event_type.startswith("subagent."):
             return False
+        # Construction intent is not a live child. A later preflight failure may
+        # abort the batch without a matching completion, so opening here leaves a
+        # permanent in-progress bubble.
+        if event_type == "subagent.spawn_requested":
+            return True
         payload = _subagent_payload(event_type, preview, kwargs)
         if payload is None:
             return True
         subagent_id = str(payload["subagentId"])
-        tool_call_id = subagent_tool_ids.get(subagent_id)
+        queue_name = f"subagent:{subagent_id}"
+        queue = _upgrade_queue(tool_call_ids, queue_name)
+        tool_call_id = queue[0] if queue else None
+        if tool_call_id is None and event_type not in {"subagent.start", "subagent.complete"}:
+            return True
         if tool_call_id is None:
             tool_call_id = make_tool_call_id()
-            subagent_tool_ids[subagent_id] = tool_call_id
+            tool_call_ids[queue_name] = deque([tool_call_id])
             title = f"[subagent] {str(payload['goal'])[:120]}"
             _send_update(
                 conn,
@@ -212,7 +219,7 @@ def make_tool_progress_cb(
             ),
         )
         if terminal:
-            subagent_tool_ids.pop(subagent_id, None)
+            tool_call_ids.pop(queue_name, None)
         return True
 
     def _tool_progress(event_type: str, name: str = None, preview: str = None, args: Any = None, **kwargs) -> None:

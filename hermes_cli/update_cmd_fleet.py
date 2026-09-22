@@ -703,6 +703,14 @@ def _run_pending_fleet_restart() -> bool:
 
     failed: list = []
     try:
+        # Catch-up runs before the normal restart path, so initialise the user-manager
+        # environment here as well.  Without this, root/system installs can have a live
+        # user manager at /run/user/0/bus while `systemctl --user` sees no bus, causing
+        # an otherwise successful system-service restart to be reported as incomplete.
+        if supports_systemd_services():
+            from hermes_cli.gateway import _ensure_user_systemd_env
+            with suppress(Exception):
+                _ensure_user_systemd_env()
         # Snapshot before stopping: Restart=no units can disappear from list-units on a clean exit.
         systemd_listings = list(_systemd_gateway_unit_listings()) if supports_systemd_services() else None
         # Stop old processes before supervisor recovery, never its freshly verified workers.

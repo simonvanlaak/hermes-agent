@@ -41,6 +41,40 @@ def cmd_usage(args: argparse.Namespace) -> int:
     from hermes_cli.runtime_provider import resolve_requested_provider
 
     provider = resolve_requested_provider(getattr(args, "provider", None))
+    if getattr(args, "all_credentials", False):
+        from agent.credential_pool import load_pool
+
+        account_snapshots = []
+        for entry in load_pool(provider).entries():
+            snapshot = fetch_account_usage(
+                provider,
+                base_url=entry.runtime_base_url,
+                api_key=entry.runtime_api_key,
+            )
+            if snapshot is None:
+                continue
+            account_snapshots.append((entry, snapshot))
+        accounts = [
+            {
+                "id": entry.id,
+                "label": entry.label,
+                "priority": entry.priority,
+                "usage": usage_snapshot_document(snapshot),
+            }
+            for entry, snapshot in account_snapshots
+        ]
+        if not accounts:
+            print(f"No account usage available for provider '{provider}'.", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps({"provider": provider, "accounts": accounts}, indent=2))
+        else:
+            for index, (entry, snapshot) in enumerate(account_snapshots):
+                if index:
+                    print()
+                print(entry.label)
+                print("\n".join(render_account_usage_lines(snapshot)))
+        return 0
     # No explicit key: the fetcher resolves the credential exactly as a session without a live agent
     # would (singleton store, then credential pool) — it never adopts or refreshes anything else.
     snapshot = fetch_account_usage(provider)
@@ -70,4 +104,7 @@ def build_usage_parser(subparsers) -> None:
         "--provider", default=None, help="Provider to query (default: the configured model provider)")
     usage_parser.add_argument(
         "--json", action="store_true", help="Print one JSON document instead of the human-readable block")
+    usage_parser.add_argument(
+        "--all-credentials", action="store_true",
+        help="Report every credential in the provider pool instead of only the selected account")
     usage_parser.set_defaults(func=cmd_usage)

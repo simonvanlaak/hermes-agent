@@ -749,6 +749,34 @@ class TestRegisterSessionMcpServers:
             # Should not raise
             await agent._register_session_mcp_servers(state, [server])
 
+    @pytest.mark.asyncio
+    async def test_parked_mcp_failure_logs_actionable_diagnostic(self, agent, mock_manager, caplog):
+        """Fail-soft discovery must not become an unexplained zero-tool ACP result."""
+        from acp.schema import McpServerHttp
+
+        state = mock_manager.create_session(cwd="/tmp")
+        server = McpServerHttp(
+            name="t3-code",
+            url="http://127.0.0.1:3774/mcp",
+            headers=[],
+        )
+        status = [{
+            "name": "t3-code",
+            "status": "failed",
+            "error": "HTTP 400: Unsupported MCP-Protocol-Version: 2025-11-25 "
+                     "Authorization: Bearer ***",
+        }]
+
+        with patch("tools.mcp_tool_discovery.register_mcp_servers", return_value=[]), \
+             patch("tools.mcp_tool_discovery.get_mcp_status", return_value=status), \
+             caplog.at_level("WARNING", logger="acp_adapter.server"):
+            await agent._register_session_mcp_servers(state, [server])
+
+        assert "t3-code" in caplog.text
+        assert "HTTP 400" in caplog.text
+        assert "Unsupported MCP-Protocol-Version" in caplog.text
+        assert "secret-value" not in caplog.text
+
 
 class TestDisabledToolsetsFilterToolSurface:
     def test_cmd_tools_strips_configured_disabled_toolsets(self, agent, mock_manager):

@@ -195,6 +195,9 @@ def test_an_explicit_protocol_header_still_wins():
     async def _discover_tools(self):
         self._shutdown_event.set()
 
+    async def _initialize_at_protocol_version(self, session, version):
+        return None
+
     async def _drive():
         with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
              _patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
@@ -202,6 +205,7 @@ def test_an_explicit_protocol_header_still_wins():
              _patch("tools.mcp_tool.streamable_http_client",
                     return_value=_transport_yielding(MagicMock(), MagicMock())), \
              _patch("tools.mcp_tool.ClientSession", _DummySession), \
+             _patch.object(MCPServerTask, "_initialize_at_protocol_version", _initialize_at_protocol_version), \
              _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
             await server._run_http({
                 "url": "https://example.com/mcp",
@@ -212,3 +216,52 @@ def test_an_explicit_protocol_header_still_wins():
 
     headers = {k.lower(): v for k, v in (seen.get("headers") or {}).items()}
     assert headers.get("mcp-protocol-version") == "2025-06-18"
+
+
+def test_an_explicit_protocol_header_pins_the_initialize_body_version():
+    """ACP hosts can name the revision their embedded MCP server implements."""
+    from unittest.mock import patch as _patch
+
+    from tools.mcp_tool import MCPServerTask
+
+    server = MCPServerTask("remote")
+    seen: dict = {}
+
+    async def _initialize_at_protocol_version(self, session, version):
+        seen["version"] = version
+        return None
+
+    async def _discover_tools(self):
+        self._shutdown_event.set()
+
+    async def _drive():
+        with _patch("tools.mcp_tool._MCP_HTTP_AVAILABLE", True), \
+             _patch("tools.mcp_tool._MCP_NEW_HTTP", True), \
+             _patch_sdk_async_client(_DummyAsyncClient), \
+             _patch("tools.mcp_tool.streamable_http_client",
+                    return_value=_transport_yielding(MagicMock(), MagicMock())), \
+             _patch("tools.mcp_tool.ClientSession", _DummySession), \
+             _patch.object(MCPServerTask, "_initialize_at_protocol_version", _initialize_at_protocol_version), \
+             _patch.object(MCPServerTask, "_discover_tools", _discover_tools):
+            await server._run_http({
+                "url": "https://example.com/mcp",
+                "headers": {"MCP-Protocol-Version": "2025-06-18"},
+            })
+
+    asyncio.run(_drive())
+
+    assert seen["version"] == "2025-06-18"
+
+
+def test_explicit_protocol_initialization_rejects_a_different_server_version():
+    from types import SimpleNamespace
+
+    from tools.mcp_tool import MCPServerTask
+
+    class _Session:
+        async def send_request(self, *_args):
+            return SimpleNamespace(protocol_version="2025-11-25")
+
+    with pytest.raises(RuntimeError, match="explicitly requested '2025-06-18'"):
+        asyncio.run(MCPServerTask("remote")._initialize_at_protocol_version(
+            _Session(), "2025-06-18"))

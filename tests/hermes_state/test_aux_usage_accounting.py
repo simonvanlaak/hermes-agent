@@ -39,6 +39,110 @@ def _usage_rows(db, session_id):
     return [dict(r) for r in rows]
 
 
+def _usage_event_rows(db, session_id):
+    with db._lock:
+        rows = db._conn.execute(
+            "SELECT * FROM usage_events WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+class TestUsageEventLedger:
+    def test_incremental_calls_append_timestamped_events(self, db, monkeypatch):
+        db.create_session("s1", source="cli")
+        next_timestamp = 1_700_000_000.25
+
+        def advancing_time():
+            nonlocal next_timestamp
+            value = next_timestamp
+            next_timestamp += 3_601.5
+            return value
+
+        monkeypatch.setattr("hermes_state_usage.time.time", advancing_time)
+
+        db.update_token_counts(
+            "s1", input_tokens=100, output_tokens=10,
+            model="main-model", billing_provider="nous", api_call_count=1,
+        )
+        db.update_token_counts(
+            "s1", input_tokens=200, output_tokens=20,
+            model="main-model", billing_provider="nous", api_call_count=1,
+        )
+
+        rows = _usage_event_rows(db, "s1")
+        assert len(rows) == 2
+        assert rows[1]["occurred_at"] > rows[0]["occurred_at"]
+        assert [row["input_tokens"] for row in rows] == [100, 200]
+        assert [row["api_call_count"] for row in rows] == [1, 1]
+
+    def test_queued_calls_preserve_enqueue_timestamps_across_periods(self, db, monkeypatch):
+        db.create_session("s1", source="cli")
+        timestamps = iter((1_700_000_000.25, 1_700_090_001.75))
+        monkeypatch.setattr("hermes_state_usage.time.time", lambda: next(timestamps))
+        monkeypatch.setattr(db, "_token_writer_thread", SimpleNamespace(is_alive=lambda: True))
+
+        db.queue_token_counts(
+            "s1", input_tokens=100, output_tokens=10,
+            model="main-model", billing_provider="nous", api_call_count=1,
+        )
+        db.queue_token_counts(
+            "s1", input_tokens=200, output_tokens=20,
+            model="main-model", billing_provider="nous", api_call_count=1,
+        )
+        with db._token_queue_cond:
+            batch = list(db._token_queue)
+            db._token_queue.clear()
+        monkeypatch.setattr(db, "_token_writer_thread", None)
+        monkeypatch.setattr("hermes_state_usage.time.time", lambda: 1_700_999_999.0)
+
+        db._apply_token_batch(batch)
+
+        rows = _usage_event_rows(db, "s1")
+        assert [row["occurred_at"] for row in rows] == [1_700_000_000.25, 1_700_090_001.75]
+        assert [row["input_tokens"] for row in rows] == [100, 200]
+
+    def test_auxiliary_usage_appends_task_event(self, db, monkeypatch):
+        db.create_session("s1", source="cli")
+        monkeypatch.setattr("hermes_state_usage.time.time", lambda: 1_700_000_123.0)
+
+        db.record_auxiliary_usage(
+            "s1", "vision", model="gemini-3-flash",
+            billing_provider="gemini", input_tokens=500, output_tokens=50,
+        )
+
+        assert _usage_event_rows(db, "s1") == [pytest.approx({
+            "id": 1,
+            "session_id": "s1",
+            "model": "gemini-3-flash",
+            "billing_provider": "gemini",
+            "billing_base_url": "",
+            "billing_mode": "",
+            "task": "vision",
+            "api_call_count": 1,
+            "input_tokens": 500,
+            "output_tokens": 50,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "estimated_cost_usd": 0.0,
+            "actual_cost_usd": 0.0,
+            "cost_status": None,
+            "cost_source": None,
+            "occurred_at": 1_700_000_123.0,
+        })]
+
+    def test_absolute_cumulative_update_does_not_append_event(self, db):
+        db.create_session("s1", source="gateway")
+        db.update_token_counts(
+            "s1", input_tokens=500, output_tokens=50,
+            model="gateway-model", billing_provider="openrouter",
+            api_call_count=3, absolute=True,
+        )
+
+        assert _usage_event_rows(db, "s1") == []
+
+
 class TestRecordAuxiliaryUsage:
     def test_records_task_row(self, db):
         db.create_session("s1", source="cli")

@@ -8,11 +8,11 @@ import os
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 from utils import normalize_proxy_url
 from agent.proxy_bypass import is_loopback_host, should_bypass_proxy
 from agent import runtime_cwd as _runtime_cwd
-from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _describe_http_failure, _handshake_answered_with_unsupported_version, _handshake_rejected_as_modern, _is_streamable_http_rejection, _make_http_rejection_recorder, _make_mcp_body_cap_transport, _make_redirect_header_stripper, _resolve_client_cert, _unwrap_exception_group
+from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _describe_http_failure, _handshake_answered_with_unsupported_version, _handshake_rejected_as_modern, _is_protocol_negotiation_rejection, _is_streamable_http_rejection, _make_http_rejection_recorder, _make_mcp_body_cap_transport, _make_redirect_header_stripper, _resolve_client_cert, _unwrap_exception_group
 from tools.mcp_tool_lifecycle import _filter_mcp_children, _orphan_stdio_pid_servers, _orphan_stdio_pids, _stdio_pgids, _stdio_pids
 from tools.mcp_tool_common import _core
 from tools import mcp_tool_config as _config
@@ -147,7 +147,12 @@ class MCPServerTransportMixin:
         mode, so handshake-era servers pay zero extra round-trips. ``stateless`` probes discover first
         (one legacy retry on any error); ``legacy`` is handshake only. A TIMEOUT never falls back."""
         def call(method: str):
-            return asyncio.wait_for(getattr(session, method)(), timeout=connect_timeout)
+            version = getattr(self, "_http_protocol_version", None)
+            if method == "initialize" and version:
+                operation = self._initialize_at_protocol_version(session, version)
+            else:
+                operation = getattr(session, method)()
+            return asyncio.wait_for(operation, timeout=connect_timeout)
 
         async def attempt(primary, fallback, should_fallback, log_fmt, *log_extra):
             try:
@@ -184,6 +189,38 @@ class MCPServerTransportMixin:
         return await attempt(
             "initialize", "discover", lambda exc: _handshake_rejected_as_modern(exc) and hasattr(session, "discover"),
             "MCP server '%s': legacy handshake rejected (%s) — retrying via server/discover (2026-07-28 stateless server)")
+
+    async def _initialize_at_protocol_version(self, session, version: str):
+        """Initialize at an explicitly configured HTTP protocol revision.
+
+        ACP only has a portable HTTP-header escape hatch. When its host supplies
+        MCP-Protocol-Version, use that same value in the initialize body instead
+        of sending the SDK default and advertising a contradictory revision.
+        """
+        import mcp.types as types
+
+        build_caps = getattr(session, "_build_capabilities", None)
+        capabilities: Any = build_caps(version) if callable(build_caps) else types.ClientCapabilities()
+        client_info = getattr(session, "_client_info", None) or types.Implementation(
+            name="hermes-agent", version="0")
+        result = await session.send_request(
+            types.InitializeRequest(params=types.InitializeRequestParams(
+                protocol_version=version,
+                capabilities=capabilities,
+                client_info=client_info,
+            )),
+            types.InitializeResult,
+        )
+        returned_version = str(getattr(result, "protocol_version", "") or "")
+        if returned_version != version:
+            raise RuntimeError(
+                f"MCP server returned protocol version {returned_version!r} after the client "
+                f"explicitly requested {version!r}")
+        adopt = getattr(session, "adopt", None)
+        if callable(adopt):
+            adopt(result.model_copy(update={"protocol_version": version}))
+        await session.send_notification(types.InitializedNotification())
+        return result
 
     async def _complete_handshake_at_offered_version(self, session):
         """Re-run the legacy ``initialize`` exchange the SDK already proved works against this server and
@@ -542,7 +579,13 @@ class MCPServerTransportMixin:
         headers = _apply_identity_header(self.name, config, headers)  # explicit same-name headers win
         # Seed MCP-Protocol-Version (user override wins) from the HANDSHAKE version, not the latest: a
         # 2026-07-28 header routes the handshake-era ``initialize()`` onto the envelope ladder, which rejects it.
-        if not any(key.lower() == "mcp-protocol-version" for key in headers):
+        explicit_protocol_version = next(
+            (str(value).strip() for key, value in headers.items()
+             if key.lower() == "mcp-protocol-version" and str(value).strip()),
+            None,
+        )
+        self._http_protocol_version = explicit_protocol_version
+        if explicit_protocol_version is None:
             headers["mcp-protocol-version"] = _core.LATEST_HANDSHAKE_VERSION
         connect_timeout = config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
         common = (url, headers, connect_timeout, config.get("ssl_verify", True), _resolve_client_cert(self.name, config),
@@ -571,7 +614,9 @@ class MCPServerTransportMixin:
             # transport must not silently switch transports), never on a timeout (not a
             # transport mismatch — ``_is_streamable_http_rejection`` matches neither), and never
             # with ``strict_redirect_headers`` (SSE cannot enforce that boundary).
-            if (self._ever_connected or common[-1] or not _is_streamable_http_rejection(exc)):
+            if (self._ever_connected or common[-1]
+                    or _is_protocol_negotiation_rejection(exc, self._http_rejection)
+                    or not _is_streamable_http_rejection(exc)):
                 if http_detail != str(_unwrap_exception_group(exc)):  # opaque SDK error + a recorded rejection
                     raise ConnectionError(f"MCP server '{self.name}': Streamable HTTP connect failed "
                                           f"({http_detail})") from exc

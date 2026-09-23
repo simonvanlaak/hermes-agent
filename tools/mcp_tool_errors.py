@@ -132,6 +132,33 @@ def _describe_http_failure(exc: BaseException, rejection: dict) -> str:
     return f"{text} ({detail})"
 
 
+def _is_protocol_negotiation_rejection(exc: BaseException, rejection: dict) -> bool:
+    """True when a recorded HTTP rejection names MCP protocol negotiation.
+
+    This is a valid Streamable HTTP endpoint rejecting the offered revision, not
+    evidence of an SSE-only endpoint. Retrying GET/SSE only hides the useful 400
+    behind an expected 405.
+    """
+    root = _unwrap_exception_group(exc)
+    response = getattr(root, "response", None)
+    response_body = ""
+    if response is not None:
+        try:
+            response_body = str(getattr(response, "text", "") or "")
+        except Exception:
+            response_body = ""
+    evidence = " ".join((
+        str(rejection.get("body") or ""),
+        str(root),
+        response_body,
+    )).lower()
+    return any(marker in evidence for marker in (
+        "mcp-protocol-version",
+        "protocol version",
+        "protocolversion",
+    ))
+
+
 def _unwrap_exception_group(exc: BaseException) -> BaseException:
     """Root-cause leaf of anyio ``(Base)ExceptionGroup`` wrappers (group ``str()`` is opaque). A
     ``KeyboardInterrupt``/``SystemExit`` leaf anywhere is re-raised, never flattened into a loggable

@@ -437,7 +437,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             return
         try:
             from agent.runtime_cwd import set_session_cwd
-            from tools.mcp_tool_discovery import register_mcp_servers
+            from tools.mcp_tool_common import _sanitize_error
+            from tools.mcp_tool_discovery import get_mcp_status, register_mcp_servers
 
             configs = {s.name: _mcp_server_config(s) for s in mcp_servers}
 
@@ -446,6 +447,17 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 # the default stdio child cwd (tools/mcp_tool_transport.py::_run_stdio), so pin it here.
                 set_session_cwd(state.cwd)
                 register_mcp_servers(configs)
+                failed = [entry for entry in get_mcp_status(configs)
+                          if entry.get("status") == "failed"]
+                if failed:
+                    details = "; ".join(
+                        f"{entry.get('name', 'unknown')} "
+                        f"({_sanitize_error(str(entry.get('error') or 'unknown error'))})"
+                        for entry in failed)
+                    logger.warning(
+                        "Session %s: ACP MCP registration completed with failed server(s): %s",
+                        state.session_id, details,
+                    )
 
             await asyncio.to_thread(_register_pinned)  # to_thread already runs in a copied context
         except Exception:

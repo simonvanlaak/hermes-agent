@@ -95,7 +95,7 @@ def test_opaque_sdk_rejection_is_reported_with_the_servers_status_and_body(monke
     from tools.mcp_tool import sdk_httpx
 
     httpx2 = sdk_httpx()
-    body = '{"jsonrpc":"2.0","error":{"code":-32020,"message":"Unsupported MCP-Protocol-Version"}}'
+    body = '{"jsonrpc":"2.0","error":{"code":-32020,"message":"Bad request"}}'
 
     async def _real_client_roundtrip(status, content_type):
         """The recorder on a real SDK-httpx client, through the streaming API the SDK uses; the
@@ -142,3 +142,42 @@ def test_opaque_rejection_without_fallback_surfaces_the_status(monkeypatch):
     with pytest.raises(ConnectionError, match=r"HTTP 503 from POST http://127\.0\.0\.1:1/mcp: upstream down"):
         asyncio.run(task._run_http(dict(_CONFIG)))
     assert "SSE" not in calls
+
+
+def test_protocol_version_rejection_does_not_retry_the_wrong_sse_transport(monkeypatch):
+    """A valid Streamable HTTP endpoint rejecting negotiation is not an SSE endpoint."""
+    task, calls = _task(monkeypatch, ExceptionGroup("g", [_SdkInternalError()]))
+    monkeypatch.setattr(
+        MCPServerTask,
+        "_streamable_http_transport",
+        lambda self, *a, **k: self._http_rejection.update(
+            status=400,
+            method="POST",
+            url="http://127.0.0.1:1/mcp",
+            body='{"error":{"message":"Unsupported MCP-Protocol-Version: 2025-11-25"}}',
+        )
+        or object(),
+    )
+
+    with pytest.raises(ConnectionError, match="Unsupported MCP-Protocol-Version"):
+        asyncio.run(task._run_http(dict(_CONFIG)))
+
+    assert calls == ["HTTP"]
+
+
+def test_protocol_rejection_from_http_response_does_not_retry_sse_without_recorder_body(monkeypatch):
+    request = httpx.Request("POST", "http://127.0.0.1:1/mcp")
+    response = httpx.Response(
+        400,
+        request=request,
+        text='{"error":{"message":"Unsupported protocol version 2025-11-25"}}',
+    )
+    task, calls = _task(
+        monkeypatch,
+        httpx.HTTPStatusError("Bad Request", request=request, response=response),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(task._run_http(dict(_CONFIG)))
+
+    assert calls == ["HTTP"]

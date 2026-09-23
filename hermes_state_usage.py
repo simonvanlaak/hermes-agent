@@ -70,6 +70,14 @@ _MODEL_USAGE_UPSERT_SQL = """INSERT INTO session_model_usage (
                    cost_source = COALESCE(excluded.cost_source, cost_source),
                    last_seen = excluded.last_seen"""
 
+_USAGE_EVENT_INSERT_SQL = """INSERT INTO usage_events (
+                   session_id, model, billing_provider, billing_base_url, billing_mode,
+                   task, api_call_count, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                   estimated_cost_usd, actual_cost_usd, cost_status, cost_source,
+                   occurred_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
 
 # Kwargs forwarded verbatim from update_token_counts / record_auxiliary_usage into
 # _record_model_usage (the per-route attribution row).
@@ -109,6 +117,8 @@ class SessionUsageMixin:
         """Enqueue a token/cost delta for the background writer (same kwargs as
         :meth:`update_token_counts`). After close() stopped the writer, falls back to the
         synchronous path and may raise."""
+        kwargs = dict(kwargs)
+        kwargs.setdefault("occurred_at", time.time())
         with self._token_queue_cond:
             thread = self._token_writer_thread
             writer_alive = thread is not None and thread.is_alive()
@@ -218,7 +228,11 @@ class SessionUsageMixin:
         for session_id, kwargs in batch:
             key = None
             if not kwargs.get("absolute"):
-                key = (session_id, *(kwargs.get(f) for f in self._TOKEN_DELTA_ROUTE_FIELDS))
+                key = (
+                    session_id,
+                    *(kwargs.get(f) for f in self._TOKEN_DELTA_ROUTE_FIELDS),
+                    kwargs.get("occurred_at"),
+                )
             if groups and key is not None and groups[-1][0] == key:
                 merged = groups[-1][2]
                 for f in self._TOKEN_DELTA_SUM_FIELDS:
@@ -278,13 +292,14 @@ class SessionUsageMixin:
         actual_cost_usd: Optional[float]=None, cost_status: Optional[str]=None, cost_source: Optional[str]=None,
         pricing_version: Optional[str]=None, billing_provider: Optional[str]=None, billing_base_url: Optional[str]=None,
         billing_mode: Optional[str]=None, api_call_count: int=0, absolute: bool=False,
-        source: Optional[str]=None,
+        source: Optional[str]=None, occurred_at: Optional[float]=None,
     ) -> None:
         """Update token counters and backfill model if unset. *absolute*=False increments
         (per-API-call deltas, CLI path); *absolute*=True sets directly (gateway path,
         where the cached agent holds cumulative totals). ``source`` is the session's real surface
         for the row-existence guard; callers that don't know it leave the placeholder."""
         usage = {k: v for k, v in locals().items() if k in _MODEL_USAGE_FIELDS}
+        usage["occurred_at"] = occurred_at
         # Ensure the row exists: under concurrent load create_session() may have failed on
         # locking, and the UPDATE would silently affect 0 rows. When this guard is the first
         # writer it must carry the agent's real source: the turn lease treats an existing row as
@@ -342,6 +357,7 @@ class SessionUsageMixin:
         output_tokens: int=0, cache_read_tokens: int=0, cache_write_tokens: int=0, reasoning_tokens: int=0,
         estimated_cost_usd: Optional[float]=None, actual_cost_usd: Optional[float]=None,
         cost_status: Optional[str]=None, cost_source: Optional[str]=None, api_call_count: int=0, task: str="",
+        occurred_at: Optional[float]=None,
     ) -> None:
         """Accumulate a per-API-call usage delta into session_model_usage, inside the caller's
         write txn after the ``sessions`` UPDATE. A missing model/provider falls back to
@@ -357,14 +373,23 @@ class SessionUsageMixin:
             "SELECT model, billing_provider, billing_base_url, billing_mode FROM sessions WHERE id = ?", (session_id,),
         ).fetchone()
         sess = dict(row) if (row is not None and not task) else {}
+        resolved_model = model or sess.get("model") or "unknown"
+        resolved_provider = billing_provider or sess.get("billing_provider") or ""
+        resolved_base_url = billing_base_url or sess.get("billing_base_url") or ""
+        resolved_mode = billing_mode or sess.get("billing_mode") or ""
+        resolved_task = task or ""
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
-        now = time.time()
+        estimated_cost = float(estimated_cost_usd or 0.0)
+        actual_cost = float(actual_cost_usd or 0.0)
+        now = time.time() if occurred_at is None else float(occurred_at)
         conn.execute(_MODEL_USAGE_UPSERT_SQL, (
-            session_id, model or sess.get("model") or "unknown",
-            billing_provider or sess.get("billing_provider") or "",
-            billing_base_url or sess.get("billing_base_url") or "",
-            billing_mode or sess.get("billing_mode") or "", task or "", api_call_count or 0, *counts,
-            float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0), cost_status, cost_source, now, now))
+            session_id, resolved_model, resolved_provider, resolved_base_url,
+            resolved_mode, resolved_task, api_call_count or 0, *counts,
+            estimated_cost, actual_cost, cost_status, cost_source, now, now))
+        conn.execute(_USAGE_EVENT_INSERT_SQL, (
+            session_id, resolved_model, resolved_provider, resolved_base_url,
+            resolved_mode, resolved_task, api_call_count or 0, *counts,
+            estimated_cost, actual_cost, cost_status, cost_source, now))
 
     def record_auxiliary_usage(
         self, session_id: str, task: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,

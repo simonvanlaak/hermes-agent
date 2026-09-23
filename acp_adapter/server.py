@@ -170,7 +170,17 @@ def _history_replay_updates(history: list[dict[str, Any]]):
 def _mcp_server_config(server: McpServerStdio | McpServerHttp | McpServerSse) -> dict:
     if isinstance(server, McpServerStdio):
         return {"command": server.command, "args": list(server.args), "env": {i.name: i.value for i in server.env}}
-    return {"url": server.url, "headers": {i.name: i.value for i in server.headers}}
+    # ACP clients explicitly select and authenticate these endpoints. Skip Hermes' generic
+    # HEAD/GET content-type probe: app servers such as T3 serve their UI on HEAD while their
+    # MCP route is POST-only. The real MCP SDK still negotiates the supported protocol.
+    config = {
+        "url": server.url,
+        "headers": {i.name: i.value for i in server.headers},
+        "skip_preflight": True,
+    }
+    if isinstance(server, McpServerSse):
+        config["transport"] = "sse"
+    return config
 
 
 def _restore_env(key: str, value: str | None) -> None:

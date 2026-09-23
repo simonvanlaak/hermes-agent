@@ -16,6 +16,7 @@ from acp.schema import (
     EnvVariable,
     HttpHeader,
     McpServerHttp,
+    McpServerSse,
     McpServerStdio,
     NewSessionResponse,
     PromptResponse,
@@ -67,6 +68,11 @@ class TestMcpRegistrationE2E:
                 url="https://api.example.com/mcp",
                 headers=[HttpHeader(name="Authorization", value="Bearer tok123")],
             ),
+            McpServerSse(
+                name="test-events",
+                url="https://api.example.com/events",
+                headers=[],
+            ),
         ]
 
         registered_configs = {}
@@ -101,6 +107,13 @@ class TestMcpRegistrationE2E:
         api_cfg = registered_configs["test-api"]
         assert api_cfg["url"] == "https://api.example.com/mcp"
         assert api_cfg["headers"] == {"Authorization": "Bearer tok123"}
+        assert api_cfg["skip_preflight"] is True
+        assert "transport" not in api_cfg
+
+        events_cfg = registered_configs["test-events"]
+        assert events_cfg["url"] == "https://api.example.com/events"
+        assert events_cfg["skip_preflight"] is True
+        assert events_cfg["transport"] == "sse"
 
         # Verify agent tool surface was refreshed
         assert state.agent.tools == fake_tools
